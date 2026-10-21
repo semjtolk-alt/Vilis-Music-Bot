@@ -4,103 +4,97 @@ import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 
 const app = express();
-app.use(express.json());
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const apiKey = process.env.OPENAI_API_KEY;
 
-const {
-  TELEGRAM_BOT_TOKEN,
-  OPENAI_API_KEY
-} = process.env;
-
-if (!TELEGRAM_BOT_TOKEN || !OPENAI_API_KEY) {
-  console.error("Добавь TELEGRAM_BOT_TOKEN и OPENAI_API_KEY в настройки хостинга.");
+if (!token || !apiKey) {
+  console.error("Не заданы секретные переменные");
   process.exit(1);
 }
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
-const ai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-const conversations = new Map();
+const bot = new TelegramBot(token, { polling: true });
+const ai = new OpenAI({ apiKey });
+const histories = new Map();
 
 app.get("/", (_req, res) => {
   res.send("Vilis Music Bot работает!");
 });
 
-app.post("/telegram-webhook", async (req, res) => {
-  res.sendStatus(200);
+bot.on("message", async (msg) => {
+  if (!msg.text || !msg.chat?.id) return;
 
-  const update = req.body;
-  const message = update.message;
-  if (!message?.text || !message.chat?.id) return;
-
-  const chatId = message.chat.id;
-  const text = message.text.trim();
-
-  if (text === "/start") {
-    await bot.sendMessage(
-      chatId,
-      "🎵 Добро пожаловать в Vilis Music Bot!\n\n" +
-      "Я могу общаться с тобой и придумывать тексты песен.\n\n" +
-      "Напиши сообщение или используй /song для песни и /help для помощи."
-    );
-    return;
-  }
-
-  if (text === "/help") {
-    await bot.sendMessage(
-      chatId,
-      "Команды:\n/start — запуск\n/song — придумать песню\n/poem — написать стих\n/reset — очистить историю"
-    );
-    return;
-  }
-
-  if (text === "/reset") {
-    conversations.delete(chatId);
-    await bot.sendMessage(chatId, "История диалога очищена.");
-    return;
-  }
-
-  const mode = text.startsWith("/song")
-    ? "Напиши оригинальный текст песни по запросу пользователя."
-    : text.startsWith("/poem")
-    ? "Напиши оригинальное стихотворение по запросу пользователя."
-    : "Ты дружелюбный ИИ-помощник Vilis Music Bot. Отвечай ясно и полезно.";
-
-  const prompt = text.replace(/^\/(song|poem)\s*/, "").trim();
-  const history = conversations.get(chatId) || [];
+  const id = msg.chat.id;
+  const text = msg.text.trim();
 
   try {
-    await bot.sendChatAction(chatId, "typing");
+    if (text === "/start") {
+      await bot.sendMessage(
+        id,
+        "🎵 Привет! Это Vilis Music Bot!\n\n" +
+        "Я могу общаться и придумывать песни.\n" +
+        "/song — написать песню\n" +
+        "/poem — написать стих\n" +
+        "/reset — очистить историю"
+      );
+      return;
+    }
 
-    const response = await ai.responses.create({
+    if (text === "/reset") {
+      histories.delete(id);
+      await bot.sendMessage(id, "История очищена.");
+      return;
+    }
+
+    let instructions =
+      "Ты дружелюбный ИИ-помощник Vilis Music Bot. Отвечай по-русски.";
+
+    let prompt = text;
+
+    if (text.startsWith("/song")) {
+      instructions = "Пиши оригинальные тексты песен.";
+      prompt = text.slice(5).trim() || "Придумай оригинальную песню.";
+    } else if (text.startsWith("/poem")) {
+      instructions = "Пиши оригинальные стихотворения.";
+      prompt = text.slice(5).trim() || "Придумай стихотворение.";
+    }
+
+    await bot.sendChatAction(id, "typing");
+
+    const history = histories.get(id) || [];
+    const result = await ai.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      instructions: mode,
+      instructions,
       input: [
         ...history,
-        { role: "user", content: prompt || text }
+        { role: "user", content: prompt }
       ]
     });
 
-    const answer = response.output_text || "Не получилось сформировать ответ. Попробуй ещё раз.";
+    const answer = result.output_text || "Не получилось сформировать ответ.";
 
-    conversations.set(chatId, [
+    histories.set(id, [
       ...history,
-      { role: "user", content: prompt || text },
+      { role: "user", content: prompt },
       { role: "assistant", content: answer }
     ].slice(-12));
 
     for (let i = 0; i < answer.length; i += 4000) {
-      await bot.sendMessage(chatId, answer.slice(i, i + 4000));
+      await bot.sendMessage(id, answer.slice(i, i + 4000));
     }
   } catch (error) {
-    console.error("Ошибка ИИ:", error.message);
+    console.error("Ошибка:", error.message);
     await bot.sendMessage(
-      chatId,
-      "Не удалось получить ответ от ИИ. Проверь настройки ключа API и доступ к модели."
-    );
+      id,
+      "Ошибка ответа. Проверь ключ API и журналы Render."
+    ).catch(() => {});
   }
+});
+
+bot.on("polling_error", (error) => {
+  console.error("Ошибка Telegram:", error.message);
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => {
-  console.log(`Vilis Music Bot запущен на порту ${port}`);
+  console.log("Vilis Music Bot запущен на порту " + port);
 });
